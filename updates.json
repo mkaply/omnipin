@@ -1,7 +1,12 @@
 {
   "addons": {
     "omnipin@kaply.com": {
-      "updates": []
+      "updates": [
+        {
+          "version": "0.1",
+          "update_link": "https://github.com/mkaply/omnipin/releases/download/v0.1/omnipin-v0.1.xpi"
+        }
+      ]
     }
   }
 }
