@@ -1,0 +1,75 @@
+name: release
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - 'manifest.json'
+  workflow_dispatch:
+jobs:
+  build_release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: check version change
+        id: check
+        run: |
+          OLD_VERSION=$(git show HEAD~1:manifest.json 2>/dev/null | jq -r .version 2>/dev/null || echo "")
+          NEW_VERSION=$(jq -r .version manifest.json)
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: get version
+        if: steps.check.outputs.skip != 'true'
+        id: version
+        run: echo "version=$(jq -r .version manifest.json)" >> $GITHUB_OUTPUT
+
+      - name: install web-ext
+        if: steps.check.outputs.skip != 'true'
+        run: npm install -g web-ext
+
+      - name: sign extension
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          web-ext sign \
+            --source-dir=. \
+            --artifacts-dir=web-ext-artifacts \
+            --channel=unlisted \
+            --api-key=${{ secrets.AMO_JWT_ISSUER }} \
+            --api-secret=${{ secrets.AMO_JWT_SECRET }} \
+            --timeout=900000 \
+            --ignore-files=updates.json README.md
+
+      - name: update updates.json
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          SIGNED_XPI=$(ls web-ext-artifacts/*.xpi | head -1)
+          mv "$SIGNED_XPI" "web-ext-artifacts/omnipin-v${VERSION}.xpi"
+          UPDATE_LINK="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/omnipin-v${VERSION}.xpi"
+          jq --arg version "$VERSION" --arg url "$UPDATE_LINK" \
+            '.addons["omnipin@kaply.com"].updates = [{"version": $version, "update_link": $url}]' \
+            updates.json > updates.tmp.json && mv updates.tmp.json updates.json
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add updates.json
+          git commit -m "Update updates.json for v${VERSION}"
+          git push
+
+      - name: release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v${{ steps.version.outputs.version }} \
+            --title "v${{ steps.version.outputs.version }}" \
+            "web-ext-artifacts/omnipin-v${{ steps.version.outputs.version }}.xpi"

@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "name": "Omnipin",
+  "version": "0.1",
+  "description": "Pinned tabs in every window. Omnipin makes your pinned set window-independent — the same pins appear in every window and live in extension storage, so closing a window never loses them, and they reopen at their pinned URL across restarts. Unpin removes a pin everywhere.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "sessions",
+    "webRequest",
+    "webRequestBlocking"
+  ],
+  "optional_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+  "options_ui": {
+    "page": "options.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omnipin@kaply.com",
+      "update_url": "https://raw.githubusercontent.com/mkaply/omnipin/main/updates.json",
+      "strict_min_version": "115.0"
+    }
+  }
+}

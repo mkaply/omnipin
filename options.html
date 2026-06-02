@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Omnipin — Options</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 640px; }
+    h1 { font-size: 18px; margin: 0 0 16px; }
+    .row { display: flex; gap: 12px; align-items: flex-start; padding: 14px;
+           border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 10px; }
+    .row input { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; }
+    .label { font-weight: 600; }
+    .desc { opacity: 0.75; margin-top: 4px; }
+    .perm { opacity: 0.6; margin-top: 6px; font-size: 12px; }
+    #status { margin-top: 12px; min-height: 1.2em; font-size: 13px; opacity: 0.8; }
+    .row.action { margin-top: 12px; align-items: center; }
+    .row.action span { flex: 1 1 auto; }
+    button { flex: 0 0 auto; cursor: pointer; border-radius: 6px; padding: 6px 12px;
+             font-size: 13px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+             background: transparent; color: inherit; }
+    button:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+  </style>
+</head>
+<body>
+  <h1>Omnipin</h1>
+  <label class="row">
+    <input type="checkbox" id="abp">
+    <span>
+      <div class="label">Address bar protection</div>
+      <div class="desc">When on, typing a URL into a pinned tab opens it in a new tab instead of
+        navigating the pinned page away — so you can't lose a pin by mistyping in the address bar.</div>
+      <div class="perm">Requires permission to access all websites (used only to watch pinned-tab
+        navigations). Turning this off revokes it.</div>
+    </span>
+  </label>
+  <div class="row action">
+    <span>
+      <div class="label">Saved pins</div>
+      <div class="desc">Forget all stored pins. Currently-open pinned tabs stay as ordinary
+        pinned tabs — this only clears what the add-on remembers (useful for wiping stale data).</div>
+    </span>
+    <button id="clear" type="button">Clear</button>
+  </div>
+  <div id="status"></div>
+  <script src="options.js"></script>
+</body>
+</html>
