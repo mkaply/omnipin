@@ -411,7 +411,10 @@ function pinAddressBarGuard(details) {
   if (!entry) return;
   if (sameUrl(details.url, entry.url)) return;          // refresh / same page: allow
 
-  // Typed a different URL into the pinned tab's address bar: divert it.
+  // Typed a different URL into the pinned tab's address bar: divert it to a new
+  // tab. Open it container-less (like a normal new tab) rather than inheriting
+  // the pin's container — a typed URL is fresh intent, and auto-containerizing
+  // it could leak the container's identity to an unrelated site.
   browser.tabs.create({ url: details.url, active: true, windowId: info.windowId });
   return { cancel: true };
 }
