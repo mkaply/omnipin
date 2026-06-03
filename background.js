@@ -142,10 +142,10 @@ async function isManageableWindow(windowId) {
 async function createPinned(windowId, entry) {
   reconciling++;
   try {
-    // Firefox forbids creating a tab pinned AND discarded, so we create it
-    // loading (active:false), then unload it once it has fetched its real
-    // favicon/title. A manually-discarded tab keeps the icon it already had,
-    // so this gives correct favicons without keeping every copy resident.
+    // Create it loading in the background (active:false) and leave it resident,
+    // so the page is ready the moment you click the pin and the favicon/title
+    // come in naturally. (We can't create it pre-discarded — Firefox forbids
+    // pinned + discarded — but here we want it loaded anyway.)
     const props = { url: entry.url, pinned: true, windowId, active: false };
     if (storeId(entry.cookieStoreId) !== "firefox-default") props.cookieStoreId = entry.cookieStoreId;
 
@@ -160,37 +160,10 @@ async function createPinned(windowId, entry) {
     }
     register(windowId, entry.pinId, tab.id);
     await browser.sessions.setTabValue(tab.id, SESSION_KEY, entry.pinId);
-    unloadOnceLoaded(tab.id); // fire-and-forget; don't block the reconcile
     return tab;
   } finally {
     reconciling--;
   }
-}
-
-// Let a freshly-created pinned copy load far enough to grab its favicon/title,
-// then discard it to reclaim memory. The favicon survives the discard.
-function unloadOnceLoaded(tabId) {
-  let done = false;
-  let timer;
-  const discardNow = () => {
-    if (done) return;
-    done = true;
-    browser.tabs.onUpdated.removeListener(listener);
-    clearTimeout(timer);
-    // Discarding the active tab fails harmlessly; if the user activated it,
-    // leaving it loaded is fine.
-    browser.tabs.discard(tabId).catch(() => {});
-  };
-  const listener = (id, changeInfo) => {
-    if (id !== tabId) return;
-    if (changeInfo.favIconUrl || changeInfo.status === "complete") {
-      // Give Firefox a beat to commit the favicon to its store, then unload.
-      clearTimeout(timer);
-      timer = setTimeout(discardNow, 1000);
-    }
-  };
-  browser.tabs.onUpdated.addListener(listener);
-  timer = setTimeout(discardNow, 20000); // safety net if the page never loads
 }
 
 async function removeManaged(tabId) {
@@ -275,8 +248,7 @@ async function reconcileWindow(windowId) {
       const entry = canonical.find((e) => e.pinId === pinId);
       if (entry && !sameUrl(tab.url, entry.url)) {
         try {
-          await browser.tabs.update(tab.id, { url: entry.url });
-          unloadOnceLoaded(tab.id); // reload home, then re-discard
+          await browser.tabs.update(tab.id, { url: entry.url }); // reload home in place
         } catch (e) { /* ignore */ }
       }
     }
