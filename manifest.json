@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Omnipin",
-  "version": "0.1",
+  "version": "0.2",
   "description": "Pinned tabs in every window. Omnipin makes your pinned set window-independent — the same pins appear in every window and live in extension storage, so closing a window never loses them, and they reopen at their pinned URL across restarts. Unpin removes a pin everywhere.",
   "permissions": [
     "tabs",
