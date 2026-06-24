@@ -6,43 +6,104 @@
   <style>
     :root { color-scheme: light dark; }
     body { font: 14px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 640px; }
-    h1 { font-size: 18px; margin: 0 0 16px; }
-    .row { display: flex; gap: 12px; align-items: flex-start; padding: 14px;
-           border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 10px; }
-    .row input { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    h2 { font-size: 14px; margin: 24px 0 10px; }
+    p.tagline { margin: 0 0 20px; opacity: 0.7; }
+    .row { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px;
+           border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+           border-radius: 10px; margin-bottom: 10px; }
+    .row.sub { margin-left: 28px; }
+    .row input[type=checkbox] { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; }
     .label { font-weight: 600; }
-    .desc { opacity: 0.75; margin-top: 4px; }
-    .perm { opacity: 0.6; margin-top: 6px; font-size: 12px; }
-    #status { margin-top: 12px; min-height: 1.2em; font-size: 13px; opacity: 0.8; }
-    .row.action { margin-top: 12px; align-items: center; }
-    .row.action span { flex: 1 1 auto; }
-    button { flex: 0 0 auto; cursor: pointer; border-radius: 6px; padding: 6px 12px;
-             font-size: 13px; border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+    .desc { opacity: 0.75; margin-top: 3px; }
+    .perm { opacity: 0.6; margin-top: 5px; font-size: 12px; }
+    .actions { display: flex; gap: 8px; margin-top: 16px; }
+    button { cursor: pointer; border-radius: 6px; padding: 6px 12px; font: inherit;
+             border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
              background: transparent; color: inherit; }
     button:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+    #status { margin-top: 12px; min-height: 1.2em; font-size: 13px; opacity: 0.8; }
+
+    ul#pins { list-style: none; margin: 0; padding: 0; }
+    li.pin { display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-bottom: 8px;
+             border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 8px; }
+    li.pin img { width: 16px; height: 16px; flex: 0 0 auto; }
+    li.pin .meta { flex: 1 1 auto; min-width: 0; }
+    li.pin .ptitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    li.pin input.purl { width: 100%; box-sizing: border-box; margin-top: 3px; font: 12px monospace;
+             padding: 3px 5px; border-radius: 5px; color: inherit; background: transparent;
+             border: 1px solid color-mix(in srgb, currentColor 25%, transparent); }
+    li.pin button { flex: 0 0 auto; padding: 4px 8px; font-size: 12px; }
+    li.pin button.rm { border-color: color-mix(in srgb, #e0245e 60%, transparent); color: #e0245e; }
+    .empty { opacity: 0.6; padding: 14px; text-align: center;
+             border: 1px dashed color-mix(in srgb, currentColor 25%, transparent); border-radius: 8px; }
   </style>
 </head>
 <body>
   <h1>Omnipin</h1>
+  <p class="tagline">Firefox pins tabs; Omnipin pins URLs. Your pins are always remembered — these
+    control how they behave.</p>
+
   <label class="row">
-    <input type="checkbox" id="abp">
+    <input type="checkbox" id="global">
     <span>
-      <div class="label">Address bar protection</div>
-      <div class="desc">When on, typing a URL into a pinned tab opens it in a new tab instead of
-        navigating the pinned page away — so you can't lose a pin by mistyping in the address bar.</div>
+      <div class="label">Pin to every window</div>
+      <div class="desc">Keep the same pinned set in every window automatically, so closing any
+        window can never lose them. Off: pins stay where you make them — use the toolbar button to
+        restore them into a window when you want.</div>
+    </span>
+  </label>
+
+  <label class="row sub">
+    <input type="checkbox" id="loadInBackground">
+    <span>
+      <div class="label">Load pinned tabs in the background</div>
+      <div class="desc">Copies load and stay resident, ready the instant you click. Turn off if you
+        run many windows — copies then load only when clicked.</div>
+    </span>
+  </label>
+
+  <label class="row">
+    <input type="checkbox" id="openAtHome">
+    <span>
+      <div class="label">Reopen pins at their URL on restart</div>
+      <div class="desc">After a restart, each pin returns to the URL you pinned, not wherever it
+        last wandered. Pins are URLs, not sessions.</div>
+    </span>
+  </label>
+
+  <label class="row">
+    <input type="checkbox" id="protectFromClose">
+    <span>
+      <div class="label">Protect pins from accidental close</div>
+      <div class="desc">Closing a pinned tab (✕ / Ctrl+W) brings it right back. Only Unpin removes a
+        pin.</div>
+    </span>
+  </label>
+
+  <label class="row">
+    <input type="checkbox" id="addressBarProtection">
+    <span>
+      <div class="label">Keep pins on their page</div>
+      <div class="desc">Typing a URL into a pinned tab opens it in a new tab instead of navigating
+        the pin away.</div>
       <div class="perm">Requires permission to access all websites (used only to watch pinned-tab
         navigations). Turning this off revokes it.</div>
     </span>
   </label>
-  <div class="row action">
-    <span>
-      <div class="label">Saved pins</div>
-      <div class="desc">Forget all stored pins. Currently-open pinned tabs stay as ordinary
-        pinned tabs — this only clears what the add-on remembers (useful for wiping stale data).</div>
-    </span>
-    <button id="clear" type="button">Clear</button>
+
+  <h2>Your pins</h2>
+  <p class="desc" style="margin-top:-4px;">Edit a pin's URL (it re-points in place — open copies stay
+    put until next opened/restored), reorder, or remove. Adopting an existing pinned tab captures
+    its <em>current</em> URL, so fix any that wandered here.</p>
+  <ul id="pins"></ul>
+  <div id="pinsEmpty" class="empty" hidden>No pins yet. Pin a tab in Firefox and it shows up here.</div>
+
+  <div class="actions">
+    <button id="clear" type="button">Clear saved pins</button>
   </div>
   <div id="status"></div>
+
   <script src="options.js"></script>
 </body>
 </html>

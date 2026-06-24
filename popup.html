@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root { color-scheme: light dark; }
+    body { font: 13px/1.4 system-ui, sans-serif; margin: 0; padding: 10px; min-width: 220px; }
+    button {
+      display: block; width: 100%; box-sizing: border-box;
+      text-align: left; cursor: pointer; margin: 0 0 6px;
+      padding: 8px 10px; font: inherit; border-radius: 6px;
+      border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+      background: transparent; color: inherit;
+    }
+    button:last-child { margin-bottom: 0; }
+    button:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+    .sub { display: block; opacity: 0.6; font-size: 11px; margin-top: 2px; }
+    #status { margin: 4px 2px 0; min-height: 1em; opacity: 0.8; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <button id="restore">
+    Restore pins to this window
+    <span class="sub">Bring your pinned set into the current window</span>
+  </button>
+  <button id="settings">Settings…</button>
+  <div id="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

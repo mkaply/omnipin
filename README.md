@@ -1,70 +1,81 @@
 # Omnipin
 
-A Firefox WebExtension that makes pinned tabs **window-independent** — the same pins in every
-window, never lost.
+**Firefox pins tabs; Omnipin pins URLs.**
 
-## The problem
+A Firefox extension that fixes pinned tabs. Firefox pins a *tab* — a window-bound session object
+that drifts as you navigate, carries session state, and vanishes when its window closes. An
+Omnipin pin is the **URL you pinned**: a durable identity that's remembered, reopens at that URL,
+and can't be lost.
 
-Firefox stores pinned tabs in **per-window session state**. They are owned by one window,
-so if you close that window (or the "wrong" one in a multi-window setup) the pinned tabs go
-with it. Existing add-ons work around this by *relocating* pinned tabs to the foreground
-window, which is clunky and has a visible "moving" moment.
+## What it does
 
-## The approach
+Omnipin is a small suite of pinned-tab behaviors with opinionated defaults. Install it, change
+nothing, and pinned tabs just work the way they should. The options exist so you can *subtract*
+behaviors you don't want.
 
-Stop treating any window as the owner. `storage.local` becomes the **single source of truth**
-for the pinned set; each window's native pinned strip is just a *materialized view* of that
-list. Windows become disposable — closing any one of them cannot lose the set, because no
-window owns it.
+**Always on (the floor):** your pinned set is remembered in extension storage and is never lost
+by closing a tab, closing a window, or restarting. If pins ever go away from view, the toolbar
+button's **Restore pins to this window** brings the whole set back. "Everything off" is not vanilla
+Firefox — it's ordinary pinned tabs that are remembered and one click from coming back.
 
-| Aspect       | Behavior |
-|--------------|----------|
-| **Model**    | Global — the same pinned set is injected into the front of *every* normal window. |
-| **Storage**  | `storage.local` (this profile, survives restart, no Firefox Sync). |
-| **Open at home** | A pin's URL is fixed at pin time. Navigating a copy moves only that live tab (Firefox keeps same-domain navigation in place); **new windows and restart always open the pinned URL**, never wherever a copy wandered. |
-| **Closing**  | Protected — this is the accidental gesture. ✕ / Ctrl+W on a pinned tab **re-spawns** it; closing a whole window never loses anything. |
-| **Removing** | **Unpin** is the deliberate removal gesture. Unpinning a tab drops it from the set in every window (the tab itself stays open as an ordinary tab). |
-| **Address bar protection** | *Optional, off by default.* When enabled in options, typing a URL into a pinned tab opens it in a **new tab** instead of navigating the pin away. Requires the all-sites permission, so it's requested only when you turn it on. |
-| **Manifest** | MV2, persistent background. |
+**Toggles** (all default **on** except where noted):
 
-`pinId` (stored as a `sessions` tab value, so it survives session restore) is the logical
-identity of a pin and is shared by every window's copy.
+| Setting | Behavior | Default |
+|---------|----------|---------|
+| **Pin to every window** | The same set is auto-materialized in *every* window and kept in sync, so closing any window can't lose anything. Off: pins stay where you make them; use **Restore** to pull them into a window. | On |
+| **Load pinned tabs in the background** | Copies stay resident, ready the instant you click. Off (for many-window users): copies load only when clicked. | On |
+| **Reopen pins at their URL on restart** | After a restart, each pin returns to its pinned URL, not wherever it wandered. | On |
+| **Protect pins from accidental close** | ✕ / Ctrl+W on a pin brings it right back; only **Unpin** removes a pin. | On |
+| **Keep pins on their page** | Typing a URL into a pinned tab opens it in a new tab instead of navigating the pin away. Needs the all-sites permission, requested only when enabled. | **Off** |
+
+Pinned **container** tabs are preserved — a pin keeps its container in every window, and the same
+URL in two containers is two distinct pins.
+
+See [`DESIGN.md`](DESIGN.md) for the architecture (foundation → per-tab behaviors → global layer)
+and the deferred cross-device-sync plan.
 
 ## Install (temporary, for testing)
 
 1. Go to `about:debugging#/runtime/this-firefox`.
 2. **Load Temporary Add-on…** → pick `manifest.json` in this folder.
 
-> **Note on testing restart behavior (verify step 7):** a temporary add-on is *removed* when
-> Firefox closes, so `runtime.onStartup` never fires and the reset-to-home pass can't run. To
-> actually test "pins reopen at their URL across a restart," install it non-temporarily —
-> e.g. run it under `web-ext`, or set `xpinstall.signatures.required=false` in Developer
-> Edition/Nightly and install the packaged extension.
+> **Restart behavior can't be tested this way.** A temporary add-on is *removed* when Firefox
+> closes, so `runtime.onStartup` never fires and "Reopen pins at their URL on restart" can't run.
+> To test that, install non-temporarily — run it under `web-ext`, or set
+> `xpinstall.signatures.required=false` in Developer Edition/Nightly and install the packaged xpi.
 
 ## Verify
 
-1. Pin a tab → open a new window → it appears at the front. *(global injection)*
-2. Open 3 windows; close one that has pinned tabs → the others are unaffected. *(core fix)*
-3. Close the "wrong" whole window → nothing is lost. *(no-owner invariant)*
-4. Ctrl+W / ✕ a pinned tab → it re-spawns. *(can't be closed away)*
-5. Right-click → **Unpin** → it disappears from the set in every window. *(deliberate removal)*
-6. Navigate a pinned tab somewhere, then open a new window → the new copy opens at the **pinned
-   URL**, not where you navigated. *(open at home)*
-7. Quit and restart Firefox → pins reopen at their **pinned URL**, not wherever they wandered,
-   with no duplicates. *(URLs, not sessions — requires a non-temporary install; see note)*
-8. Pin a container tab → it reopens with the same container everywhere. *(cookieStoreId preserved)*
-9. Options → enable **Address bar protection** (grant the prompt) → type a URL into a pinned tab →
-   it opens in a new tab, pin stays put. Toggle off → the all-sites permission is revoked. *(optional)*
+With defaults (Pin-to-every-window on):
+1. Pin a tab → open a new window → it appears at the front.
+2. Open 3 windows; close one that has pinned tabs → the others are unaffected; nothing lost.
+3. Ctrl+W / ✕ a pinned tab → it re-spawns. *(protect from close)*
+4. Right-click → **Unpin** → it disappears from the set in every window. *(deliberate removal)*
+5. Pin a container tab → it reopens in the same container everywhere.
+6. *(non-temporary install)* Navigate a pin somewhere, quit and restart → it reopens at the pinned
+   URL, not where it wandered. *(open at home)*
+
+Toggle behaviors (in the toolbar popup → **Settings…**):
+7. Turn **Pin to every window** off → pinning no longer fills other windows. Open a fresh window,
+   click the toolbar button → **Restore pins to this window** → the set appears. *(recoverable)*
+8. Turn **Load in the background** off → new-window copies are unloaded until clicked.
+9. Turn **Keep pins on their page** on (grant the prompt) → type a URL into a pin → it opens in a
+   new tab, the pin stays put. Toggle off → the all-sites permission is revoked.
+10. Under **Your pins**, edit a pin's URL → it re-points in place; open a new window (or Restore)
+    → the copy opens at the new URL. Reorder / remove also work.
 
 ## Files
 
-- `manifest.json` — MV2 manifest; base permissions `tabs`, `storage`, `sessions`, `webRequest`,
-  `webRequestBlocking`; `<all_urls>` is optional (requested only for address bar protection).
-- `background.js` — the reconciler and all event handling.
-- `options.html` / `options.js` — settings page with the address bar protection toggle.
+- `manifest.json` — MV2 manifest; base permissions `tabs`, `storage`, `sessions`, `cookies`,
+  `webRequest`, `webRequestBlocking`; `<all_urls>` is optional (only for "Keep pins on their page").
+- `background.js` — the engine: set tracking, reconcile/materialize, behaviors, Restore.
+- `popup.html` / `popup.js` — toolbar button: Restore + Settings.
+- `options.html` / `options.js` — the behavior toggles, a manage-pins list (edit a pin's URL,
+  reorder, remove), and Clear saved pins.
 - `updates.json` — self-hosted update manifest (rewritten by CI on each release).
-- `.github/workflows/release.yml` — on a `manifest.json` version bump, signs the add-on via AMO
-  (unlisted) and publishes the `.xpi` as a GitHub release.
+- `.github/workflows/release.yml` — on a `manifest.json` version bump, signs via AMO (unlisted)
+  and publishes the `.xpi` as a GitHub release.
+- `DESIGN.md` — design and roadmap.
 
 ## Releasing
 

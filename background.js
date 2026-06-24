@@ -1,30 +1,41 @@
 "use strict";
 
 /*
- * Omnipin
- * -------
- * Pinned tabs in Firefox are owned by a single window's session, so closing
- * that window loses them. This extension removes the notion of an owning
- * window: storage.local holds the canonical pinned set, and every normal
- * window's pinned strip is just a materialized *view* of that set.
+ * Omnipin — pins URLs, not tabs.
+ * ------------------------------
+ * Firefox pins a *tab* (a window-bound session object that drifts, carries
+ * state, and dies with its window). An Omnipin pin is the *URL* you pinned —
+ * a durable identity that's remembered, reopens at that URL, and can't be lost.
  *
- *   - Global:       the same set is injected into every normal window.
- *   - Open at home: a pin's canonical URL is fixed at pin time. Navigating a
- *                   copy moves only that tab (Firefox keeps same-domain nav in
- *                   place); new windows / restart always open the pinned URL.
- *   - Only Unpin:   closing a pinned tab (x / Ctrl+W) re-spawns it; the sole
- *                   way to remove an entry from the set is an explicit Unpin.
- *   - Persistence:  storage.local (this profile, survives restart, no Sync).
+ * Architecture (see DESIGN.md):
+ *   Foundation (always on)
+ *     - canonical set in storage.local — the remembered pins; never lost.
+ *     - per pinned tab: a `pinId` sessions tag linking it to its set entry
+ *       (its "home" URL), surviving Firefox's session restore.
+ *     - Restore: materialize the set into a window on demand.
+ *   Layer 1 — per-tab behaviors (work on any pinned tab; toggles)
+ *     - addressBarProtection: typed nav away from home -> new tab.
+ *     - openAtHome: on restart, reset pins to their home URL.
+ *     - protectFromClose: closing a pin re-spawns it; only Unpin removes.
+ *   Layer 2 — global (toggle)
+ *     - global: auto-materialize the set into every window + keep in sync.
+ *     - loadInBackground: resident copies vs. lazy (discarded, load on click).
  *
- * Address bar protection (optional, off by default): typing a URL into a pin
- * opens it in a new tab instead of navigating the pin away. Needs <all_urls>,
- * so it's requested only when the user enables it in the options page.
- *
- * pinId is the LOGICAL identity of a pin and is shared by every window's copy
- * (stored as a sessions tab value so it survives Firefox's session restore).
+ * Defaults reproduce the original opinionated behavior, so nothing changes for
+ * existing installs unless a toggle is flipped.
  */
 
 const SESSION_KEY = "pinId";
+
+// Settings (storage.local keys) and their defaults.
+const SETTINGS_DEFAULTS = {
+  global: true,
+  loadInBackground: true,
+  openAtHome: true,
+  protectFromClose: true,
+  addressBarProtection: false, // needs <all_urls>, requested on enable
+};
+let settings = { ...SETTINGS_DEFAULTS };
 
 // ---- Durable + in-memory state --------------------------------------------
 
@@ -40,18 +51,25 @@ const tabIndex = new Map();
 const suppress = new Set();
 // >0 while we are injecting/reordering: any pinned-state churn is ours, not the user's.
 let reconciling = 0;
-// True briefly after a browser restart: reconcile resets each pin to its
-// canonical URL instead of trusting the session-restored (wandered) URL.
-// Pins are URLs, not sessions — but only on restart, never mid-session.
+// True briefly after a browser restart: reconcile resets each pin to its home
+// URL instead of trusting the session-restored (wandered) URL.
 let resetToHome = false;
 
-// Load the canonical set once before handling any event.
+function loadSettings() {
+  return browser.storage.local.get(Object.keys(SETTINGS_DEFAULTS)).then((data) => {
+    for (const k of Object.keys(SETTINGS_DEFAULTS)) {
+      settings[k] = (k in data) ? data[k] : SETTINGS_DEFAULTS[k];
+    }
+  });
+}
+
+// Load settings + the canonical set once before handling any event.
 const ready = (async () => {
+  await loadSettings();
   const data = await browser.storage.local.get("pinnedTabs");
   const stored = Array.isArray(data.pinnedTabs) ? data.pinnedTabs : [];
   // Drop stale entries we can no longer materialize (e.g. about: pages saved
-  // before we started rejecting privileged URLs) so they stop erroring on
-  // every startup.
+  // before we started rejecting privileged URLs) so they stop erroring.
   canonical = stored.filter((e) => isManageableUrl(e.url));
   if (canonical.length !== stored.length) {
     reindex();
@@ -67,8 +85,7 @@ function storeId(v) {
 
 // Firefox lets you pin privileged pages (about:*, view-source:, chrome:) but
 // blocks extensions from (re)creating them ("Illegal URL"), so we can't mirror
-// them into other windows. Only manage real web pages; leave the rest as
-// ordinary native pinned tabs.
+// them. Only manage real web pages; leave the rest as ordinary pinned tabs.
 function isManageableUrl(url) {
   return /^https?:\/\//i.test(url || "");
 }
@@ -139,13 +156,12 @@ async function isManageableWindow(windowId) {
 
 // Create one pinned copy of `entry` in `windowId`. Guarded by `reconciling`
 // so the resulting pinned=true churn isn't mistaken for a user pinning a tab.
-async function createPinned(windowId, entry) {
+// `load` overrides the loadInBackground setting (respawn forces a load — see
+// below). When undefined, honor the setting.
+async function createPinned(windowId, entry, load) {
+  const keepLoaded = (load === undefined) ? settings.loadInBackground : load;
   reconciling++;
   try {
-    // Create it loading in the background (active:false) and leave it resident,
-    // so the page is ready the moment you click the pin and the favicon/title
-    // come in naturally. (We can't create it pre-discarded — Firefox forbids
-    // pinned + discarded — but here we want it loaded anyway.)
     const props = { url: entry.url, pinned: true, windowId, active: false };
     if (storeId(entry.cookieStoreId) !== "firefox-default") props.cookieStoreId = entry.cookieStoreId;
 
@@ -153,13 +169,17 @@ async function createPinned(windowId, entry) {
     try {
       tab = await browser.tabs.create(props);
     } catch (e) {
-      // e.g. privileged URLs (about:, view-source:) can't be created. Don't let
-      // one bad entry abort the whole window reconcile.
+      // e.g. privileged URLs can't be created. Don't abort the whole reconcile.
       console.error("[pin] tabs.create failed for", entry.url, e);
       return null;
     }
     register(windowId, entry.pinId, tab.id);
     await browser.sessions.setTabValue(tab.id, SESSION_KEY, entry.pinId);
+    // Lazy mode (for many-window users): unload immediately, load on click.
+    // Resident mode: leave it loading in the background, ready on click.
+    if (!keepLoaded) {
+      try { await browser.tabs.discard(tab.id); } catch (e) { /* ignore */ }
+    }
     return tab;
   } finally {
     reconciling--;
@@ -195,10 +215,12 @@ async function reorder(windowId) {
   }
 }
 
-// Make one window's pinned strip equal the canonical set, adopting any
-// untagged native pinned tabs and de-duplicating copies that share a pinId
-// (the latter guards against the startup/session-restore race).
-async function reconcileWindow(windowId) {
+// Reconcile one window.
+//   - Always: track existing pinned tabs (adopt untagged web pins into the set,
+//     register them) and, on restart, reset them to home (open-at-home).
+//   - If `materialize`: also create copies for missing set entries and order
+//     them. This is what Global does automatically and Restore does on demand.
+async function reconcileWindow(windowId, materialize) {
   if (!(await isManageableWindow(windowId))) return;
 
   let win;
@@ -213,10 +235,10 @@ async function reconcileWindow(windowId) {
     let pinId = await browser.sessions.getTabValue(tab.id, SESSION_KEY);
 
     if (!pinId) {
-      // Can't replicate privileged pages into other windows; leave them be.
+      // Can't replicate privileged pages; leave them be.
       if (!isManageableUrl(tab.url)) continue;
-      // Native pinned tab with no tag: reuse an existing pin with the same
-      // target (e.g. the same site pinned in another window) or adopt fresh.
+      // Native pinned tab with no tag: reuse a set entry with the same target
+      // (same site pinned elsewhere) or adopt it as a new pin.
       let entry = canonical.find((e) => sameTarget(e, tab));
       if (!entry) {
         entry = {
@@ -242,30 +264,29 @@ async function reconcileWindow(windowId) {
     present.set(pinId, tab.id);
     register(windowId, pinId, tab.id);
 
-    // On restart, force the restored pin back to its canonical URL. Session
-    // restore brings tabs back wherever they wandered; we don't want that.
-    if (resetToHome) {
+    // On restart, force the restored pin back to its home URL. Session restore
+    // brings tabs back wherever they wandered; pins are URLs, not sessions.
+    if (resetToHome && settings.openAtHome) {
       const entry = canonical.find((e) => e.pinId === pinId);
       if (entry && !sameUrl(tab.url, entry.url)) {
-        try {
-          await browser.tabs.update(tab.id, { url: entry.url }); // reload home in place
-        } catch (e) { /* ignore */ }
+        try { await browser.tabs.update(tab.id, { url: entry.url }); } catch (e) { /* ignore */ }
       }
     }
   }
 
-  // Create copies for any canonical entries missing from this window.
+  if (!materialize) return;
+
+  // Create copies for any set entries missing from this window, then order.
   for (const entry of canonical) {
     if (!present.has(entry.pinId)) {
       const tab = await createPinned(windowId, entry);
       if (tab) present.set(entry.pinId, tab.id);
     }
   }
-
   await reorder(windowId);
 }
 
-async function reconcileAll(exceptWindowId) {
+async function reconcileAll(exceptWindowId, materialize) {
   let wins;
   try {
     wins = await browser.windows.getAll();
@@ -276,13 +297,24 @@ async function reconcileAll(exceptWindowId) {
   for (const win of wins) {
     if (win.id === exceptWindowId) continue;
     if (win.incognito || win.type !== "normal") continue;
-    await withWindowLock(win.id, () => reconcileWindow(win.id));
+    await withWindowLock(win.id, () => reconcileWindow(win.id, materialize));
   }
+}
+
+// Restore the full set into one window on demand (the manual recovery action,
+// and the universal "bring my pins back" path when Global is off).
+async function restorePins(windowId) {
+  await ready;
+  if (windowId == null) {
+    try { windowId = (await browser.windows.getLastFocused()).id; } catch (e) { return; }
+  }
+  await withWindowLock(windowId, () => reconcileWindow(windowId, true));
 }
 
 // ---- User-driven changes ---------------------------------------------------
 
 async function adoptUserPinned(tab) {
+  // Always add to the set + track the tab (persistence is the baseline).
   let entry = canonical.find((e) => sameTarget(e, tab));
   if (entry) {
     register(tab.windowId, entry.pinId, tab.id);
@@ -301,12 +333,11 @@ async function adoptUserPinned(tab) {
     await browser.sessions.setTabValue(tab.id, SESSION_KEY, entry.pinId);
     await persist();
   }
-  // Mirror into every other window.
-  await reconcileAll(tab.windowId);
+  // Only Global replicates into other windows; otherwise it just joins the set.
+  if (settings.global) await reconcileAll(tab.windowId, true);
 }
 
-// Unpinning is the deliberate removal gesture (you don't unpin by accident
-// the way you fat-finger Ctrl+W). Drop the entry from the canonical set and
+// Unpinning is the deliberate removal gesture. Drop the entry from the set and
 // remove its copies from every other window. The tab the user unpinned stays
 // open as an ordinary tab. Closing, by contrast, re-spawns (see onRemoved).
 async function handleUnpin(tabId, info) {
@@ -314,20 +345,20 @@ async function handleUnpin(tabId, info) {
   reindex();
   await persist();
 
-  // The unpinned tab becomes an ordinary tab; just stop managing it.
   unregister(tabId);
   try { await browser.sessions.removeTabValue(tabId, SESSION_KEY); } catch (e) { /* ignore */ }
 
-  // Remove this pin's copies from all other windows.
   for (const [, m] of windowMap) {
     const tid = m.get(info.pinId);
     if (tid != null) await removeManaged(tid);
   }
 }
 
-// Re-spawn a pinned tab the user closed (only Unpin may truly remove one).
+// Re-spawn a pinned tab the user closed (protect-from-close). Only Unpin truly
+// removes a pin; an accidental ✕/Ctrl+W brings it back at its home URL.
 const lastRespawn = new Map(); // pinId -> timestamp, runaway guard
 async function respawn(info) {
+  if (!settings.protectFromClose) return;
   const entry = canonical.find((e) => e.pinId === info.pinId);
   if (!entry) return;
 
@@ -340,89 +371,77 @@ async function respawn(info) {
     if (!(await isManageableWindow(info.windowId))) return;
     const m = windowMap.get(info.windowId);
     if (m && m.has(info.pinId)) return; // already restored
-    await createPinned(info.windowId, entry);
+    // Always load a respawn: you just closed a tab you were using; bringing it
+    // back blank (lazy) would be the wrong feel for accidental-close recovery.
+    await createPinned(info.windowId, entry, true);
     await reorder(info.windowId);
   });
 }
 
-// ---- Event wiring ----------------------------------------------------------
+// ---- Manage pins (from the options page) -----------------------------------
 
-browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  await ready;
+// Re-point a pin's home URL in place: update the stored URL but leave live
+// copies where they are. New windows / Restore / restart-reset use the new URL.
+async function updatePinUrl(pinId, url) {
+  if (!isManageableUrl(url)) return false;
+  const entry = canonical.find((e) => e.pinId === pinId);
+  if (!entry) return false;
+  entry.url = url;
+  await persist();
+  return true;
+}
 
-  if ("pinned" in changeInfo) {
-    if (reconciling > 0) return; // our own injection churn
-    if (changeInfo.pinned === true) {
-      if (tabIndex.has(tabId)) return; // already managed
-      if (!(await isManageableWindow(tab.windowId))) return;
-      if (!isManageableUrl(tab.url)) return; // privileged page: leave it native
-      await adoptUserPinned(tab);
-    } else {
-      const info = tabIndex.get(tabId);
-      if (info) await handleUnpin(tabId, info);
-    }
+// Remove a pin from the set and close its copies everywhere (like Unpin).
+async function removePinById(pinId) {
+  canonical = canonical.filter((e) => e.pinId !== pinId);
+  reindex();
+  await persist();
+  for (const [, m] of windowMap) {
+    const tid = m.get(pinId);
+    if (tid != null) await removeManaged(tid);
   }
-  // No URL drift: a pin's canonical URL is fixed at pin time ("open at home").
-  // Navigating a copy moves only that live tab, not the stored pin.
-});
+}
 
-browser.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-  await ready;
-  const info = tabIndex.get(tabId);
+// Reorder the set to match `order` (array of pinIds), then re-order live windows.
+async function reorderPinsByIds(order) {
+  const byId = new Map(canonical.map((e) => [e.pinId, e]));
+  const next = [];
+  for (const id of order) { const e = byId.get(id); if (e) { next.push(e); byId.delete(id); } }
+  for (const e of byId.values()) next.push(e); // keep any not listed
+  canonical = next;
+  reindex();
+  await persist();
+  for (const [wid] of windowMap) await withWindowLock(wid, () => reorder(wid));
+}
 
-  // Our own programmatic removal.
-  if (suppress.has(tabId)) {
-    suppress.delete(tabId);
-    unregister(tabId);
-    return;
-  }
-
-  // Window teardown must NEVER touch the canonical set — this is what makes
-  // "closing the wrong window" safe. Just forget the dead tab.
-  if (removeInfo.isWindowClosing) {
-    unregister(tabId);
-    return;
-  }
-
-  if (!info) return; // not a managed pinned tab
-
-  unregister(tabId);
-  await respawn(info); // user closed a pinned tab directly -> bring it back
-});
-
-// ---- Address bar protection (optional, off by default) --------------------
+// ---- Address bar protection (Layer 1, optional) ---------------------------
 //
-// A top-level navigation in a managed pinned tab that has NO document origin is
-// a typed/bookmark/external navigation (link clicks and in-page JS carry the
-// page as originUrl). Cancel it and open the destination in a new tab instead,
-// so the pinned page never moves. Must stay synchronous to return {cancel}.
-// Needs the <all_urls> host permission, so it's only registered when the user
-// has enabled the setting AND granted the permission.
-const PROTECT_KEY = "addressBarProtection";
+// A top-level navigation in a tracked pinned tab with NO document origin is a
+// typed/bookmark/external navigation (link clicks and in-page JS carry the page
+// as originUrl). Cancel it and open the destination in a new tab, so the pin
+// stays on its home page. Must stay synchronous to return {cancel}. Needs the
+// <all_urls> host permission, registered only when enabled AND granted.
 const PROTECT_ORIGINS = { origins: ["<all_urls>"] };
 let protecting = false;
 
 function pinAddressBarGuard(details) {
   if (details.type !== "main_frame") return;
   const info = tabIndex.get(details.tabId);
-  if (!info) return;                                   // not a managed pin
+  if (!info) return;                                   // not a tracked pin
   if (details.originUrl || details.documentUrl) return; // link / JS nav: allow
   const entry = canonical.find((e) => e.pinId === info.pinId);
   if (!entry) return;
   if (sameUrl(details.url, entry.url)) return;          // refresh / same page: allow
 
-  // Typed a different URL into the pinned tab's address bar: divert it to a new
-  // tab. Open it container-less (like a normal new tab) rather than inheriting
-  // the pin's container — a typed URL is fresh intent, and auto-containerizing
-  // it could leak the container's identity to an unrelated site.
+  // Typed a different URL into the pin's address bar: divert to a new tab.
+  // Open it container-less (like a normal new tab) rather than inheriting the
+  // pin's container — a typed URL is fresh intent.
   browser.tabs.create({ url: details.url, active: true, windowId: info.windowId });
   return { cancel: true };
 }
 
-// Register/unregister the guard to match (setting enabled) && (permission held).
 async function refreshAddressBarProtection() {
-  const data = await browser.storage.local.get(PROTECT_KEY);
-  const wanted = data[PROTECT_KEY] === true && (await browser.permissions.contains(PROTECT_ORIGINS));
+  const wanted = settings.addressBarProtection === true && (await browser.permissions.contains(PROTECT_ORIGINS));
   if (wanted && !protecting) {
     browser.webRequest.onBeforeRequest.addListener(
       pinAddressBarGuard,
@@ -436,29 +455,50 @@ async function refreshAddressBarProtection() {
   }
 }
 
-browser.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && PROTECT_KEY in changes) refreshAddressBarProtection();
-});
-browser.permissions.onAdded.addListener(refreshAddressBarProtection);
-browser.permissions.onRemoved.addListener(refreshAddressBarProtection);
+// ---- Event wiring ----------------------------------------------------------
 
-// Settings page -> wipe all saved pins (storage + in-memory). Currently-open
-// pinned tabs are left as ordinary pinned tabs; re-pinning re-adopts them.
-browser.runtime.onMessage.addListener(async (msg) => {
-  if (msg && msg.type === "clearPins") {
-    canonical = [];
-    windowMap.clear();
-    tabIndex.clear();
-    await persist();
-    return { ok: true };
+browser.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  await ready;
+
+  if ("pinned" in changeInfo) {
+    if (reconciling > 0) return; // our own injection churn
+    if (changeInfo.pinned === true) {
+      if (tabIndex.has(tabId)) return; // already tracked
+      if (!(await isManageableWindow(tab.windowId))) return;
+      if (!isManageableUrl(tab.url)) return; // privileged page: leave it native
+      await adoptUserPinned(tab);
+    } else {
+      const info = tabIndex.get(tabId);
+      if (info) await handleUnpin(tabId, info);
+    }
   }
-  return undefined;
+  // No URL drift: a pin's URL is fixed at pin time ("open at home").
+});
+
+browser.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+  await ready;
+  const info = tabIndex.get(tabId);
+
+  if (suppress.has(tabId)) {        // our own programmatic removal
+    suppress.delete(tabId);
+    unregister(tabId);
+    return;
+  }
+  if (removeInfo.isWindowClosing) { // window teardown never touches the set
+    unregister(tabId);
+    return;
+  }
+  if (!info) return;                // not a tracked pinned tab
+
+  unregister(tabId);
+  await respawn(info); // user closed a pin directly -> bring it back (if enabled)
 });
 
 browser.windows.onCreated.addListener(async (win) => {
   await ready;
   if (win.incognito || win.type !== "normal") return;
-  await withWindowLock(win.id, () => reconcileWindow(win.id));
+  // Global auto-materializes into every new window; otherwise just track.
+  await withWindowLock(win.id, () => reconcileWindow(win.id, settings.global));
 });
 
 browser.windows.onRemoved.addListener((windowId) => {
@@ -470,26 +510,72 @@ browser.windows.onRemoved.addListener((windowId) => {
   queues.delete(windowId);
 });
 
+// Settings live-update + side effects.
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  for (const k of Object.keys(SETTINGS_DEFAULTS)) {
+    if (k in changes) settings[k] = (changes[k].newValue !== undefined) ? changes[k].newValue : SETTINGS_DEFAULTS[k];
+  }
+  if ("addressBarProtection" in changes) refreshAddressBarProtection();
+  // Turning Global on materializes the set into every window. Turning it off
+  // leaves existing copies alone (we never yank live tabs).
+  if ("global" in changes && changes.global.newValue === true) reconcileAll(undefined, true);
+});
+browser.permissions.onAdded.addListener(refreshAddressBarProtection);
+browser.permissions.onRemoved.addListener(refreshAddressBarProtection);
+
+// Messages from the popup / options page.
+browser.runtime.onMessage.addListener(async (msg) => {
+  await ready;
+  if (!msg) return undefined;
+  if (msg.type === "restore") {
+    await restorePins(msg.windowId);
+    return { ok: true };
+  }
+  if (msg.type === "clearPins") {
+    canonical = [];
+    windowMap.clear();
+    tabIndex.clear();
+    await persist();
+    return { ok: true };
+  }
+  if (msg.type === "listPins") {
+    return canonical.map((e) => ({ pinId: e.pinId, url: e.url, title: e.title, favIconUrl: e.favIconUrl }));
+  }
+  if (msg.type === "updatePinUrl") {
+    return { ok: await updatePinUrl(msg.pinId, msg.url) };
+  }
+  if (msg.type === "removePin") {
+    await removePinById(msg.pinId);
+    return { ok: true };
+  }
+  if (msg.type === "reorderPins") {
+    await reorderPinsByIds(msg.order);
+    return { ok: true };
+  }
+  return undefined;
+});
+
 // ---- Startup ---------------------------------------------------------------
 //
 // Persistent background loads once at browser start and at install. Reconcile
-// what's already open, then a second debounced pass to catch windows that
-// Firefox's session restore is still materializing (pinId tags make both
-// passes idempotent — no duplicates).
+// what's open (track always; materialize only when Global is on), then a second
+// pass to catch windows session restore is still materializing. pinId tags keep
+// both passes idempotent.
 ready.then(async () => {
-  await reconcileAll();
-  setTimeout(() => reconcileAll(), 1500);
+  await reconcileAll(undefined, settings.global);
+  setTimeout(() => reconcileAll(undefined, settings.global), 1500);
   refreshAddressBarProtection();
 });
 
-browser.runtime.onInstalled.addListener(() => ready.then(() => reconcileAll()));
+browser.runtime.onInstalled.addListener(() => ready.then(() => reconcileAll(undefined, settings.global)));
 
 // Browser restart (fires ONLY on real startup, not extension reload). Turn on
-// reset-to-home while session restore materializes its windows, then turn it
-// off so navigating a pin during the session is never forced back.
+// reset-to-home while session restore materializes its windows, then off so
+// navigating a pin during the session is never forced back.
 browser.runtime.onStartup.addListener(() => {
   resetToHome = true;
   setTimeout(() => { resetToHome = false; }, 8000);
-  ready.then(() => reconcileAll());
-  setTimeout(() => ready.then(() => reconcileAll()), 2500);
+  ready.then(() => reconcileAll(undefined, settings.global));
+  setTimeout(() => ready.then(() => reconcileAll(undefined, settings.global)), 2500);
 });

@@ -21,6 +21,10 @@
   "options_ui": {
     "page": "options.html"
   },
+  "browser_action": {
+    "default_title": "Omnipin",
+    "default_popup": "popup.html"
+  },
   "browser_specific_settings": {
     "gecko": {
       "id": "omnipin@kaply.com",
